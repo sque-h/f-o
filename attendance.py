@@ -16,6 +16,7 @@
 """
 import argparse
 import csv
+from collections import OrderedDict
 import json
 import zipfile
 from datetime import datetime
@@ -29,6 +30,14 @@ ROSTER = ROOT / "roster.csv"
 CASES_DIR = ROOT / "cases"
 CASES_DB = CASES_DIR / "cases.jsonl"
 
+# 历史考勤（每次 recognize 自动累积，用于统计连续/累计缺席）
+HISTORY_DIR = ROOT / "history"
+HISTORY_CSV = HISTORY_DIR / "attendance.csv"
+
+# 清退阈值（与完整版一致）：连续缺席≥3次 或 赛季累计缺席≥8次（累计非连续）
+CONSEC_KICK = 3
+SEASON_ABSENT_CAP = 8
+
 
 def load_roster(path):
     names, squads = [], {}
@@ -40,6 +49,89 @@ def load_roster(path):
                     names.append(n)
                     squads[n] = (row.get("小队") or "").strip()
     return names, squads
+
+
+# ---------------------------------------------------------------------------
+# 历史考勤：每次 recognize 累积为「活动日期,玩家名,状态」，用于统计连续/累计缺席
+# ---------------------------------------------------------------------------
+def load_history():
+    """读取历史考勤。返回 (att, first_seen)：
+        att       : {日期: set(到场玩家名)}
+        first_seen: {玩家名: 首次出现的日期} —— 用于「中途入盟不算缺勤」
+    """
+    present = OrderedDict()
+    first_seen = {}
+    if HISTORY_CSV.exists():
+        with open(HISTORY_CSV, encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                d = (row.get("活动日期") or "").strip()
+                n = (row.get("玩家名") or "").strip()
+                s = (row.get("状态") or "").strip()
+                if not d or not n:
+                    continue
+                # 确保该日期在 att 中（即使当天无人到场，也要计入缺席统计）
+                present.setdefault(d, set())
+                if s == "到场":
+                    present[d].add(n)
+                if n not in first_seen:
+                    first_seen[n] = d
+    return present, first_seen
+
+
+def save_history(date_str, present, known):
+    """把本次全名册状态追加写入 history/attendance.csv（同日期同名不重复写）。"""
+    HISTORY_DIR.mkdir(exist_ok=True)
+    rows = [(date_str, n, "到场" if n in present else "未到场") for n in known]
+    existing = set()
+    if HISTORY_CSV.exists():
+        with open(HISTORY_CSV, encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                existing.add((row.get("活动日期"), row.get("玩家名")))
+    with open(HISTORY_CSV, "a", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        if HISTORY_CSV.stat().st_size == 0:
+            w.writerow(["活动日期", "玩家名", "状态"])
+        for d, n, s in rows:
+            if (d, n) not in existing:
+                w.writerow([d, n, s])
+
+
+def compute_absence(known, att, dates, first_seen):
+    """计算每个名册成员的 (最大连续缺席段, 赛季累计缺席)。
+       中途入盟：成员首次出现日期之前的场次不计入缺勤（视为尚未入盟）。
+       从未在历史上出现者视为入盟晚于所有活动，全部不计入缺勤。
+    """
+    out = {}
+    for name in known:
+        join = first_seen.get(name)
+        if join is None:
+            out[name] = (0, 0)
+            continue
+        consec = 0
+        max_run = 0
+        cumul = 0
+        for d in dates:
+            if d < join:
+                continue
+            if name in att.get(d, set()):
+                consec = 0
+            else:
+                consec += 1
+                cumul += 1
+                if consec > max_run:
+                    max_run = consec
+        out[name] = (max_run, cumul)
+    return out
+
+
+def kick_reason(name, abs_info):
+    """返回该成员触发的清退原因字符串（空串=不触发）。"""
+    consec, cumul = abs_info.get(name, (0, 0))
+    if consec >= CONSEC_KICK:
+        return f"连续缺席{consec}次"
+    if cumul >= SEASON_ABSENT_CAP:
+        return f"赛季累计缺席{cumul}次"
+    return ""
 
 
 def cmd_build_roster(args):
@@ -98,14 +190,26 @@ def cmd_recognize(args):
     present = {r[0] for r in results if r[3] == "ok"}
     absent = [n for n in known if n not in present]
 
+    # 累积历史（默认开；--no-history 仅本次、不写入历史）
+    if not args.no_history:
+        save_history(date_str, present, known)
+
+    # 基于历史计算连续/累计缺席（中途入盟：首次出现日前不计入）
+    att, first_seen = load_history()
+    dates = sorted(att.keys())
+    abs_info = compute_absence(known, att, dates, first_seen) if dates else {}
+
     out_csv = ROOT / f"attendance_{date_str}.csv"
     with open(out_csv, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["玩家名", "小队", "状态", "OCR文本", "相似度"])
+        w.writerow(["玩家名", "小队", "状态", "OCR文本", "相似度", "连续缺席", "累计缺席", "建议清退"])
         for name, raw, score, status in results:
-            w.writerow([name, squads.get(name, ""), "到场" if status == "ok" else "疑似", raw, score])
+            consec, cumul = abs_info.get(name, (0, 0))
+            w.writerow([name, squads.get(name, ""), "到场" if status == "ok" else "疑似", raw, score,
+                        consec, cumul, "是" if kick_reason(name, abs_info) else ""])
         for n in absent:
-            w.writerow([n, squads.get(n, ""), "未到场", "", ""])
+            consec, cumul = abs_info.get(n, (0, 0))
+            w.writerow([n, squads.get(n, ""), "未到场", "", "", consec, cumul, "是" if kick_reason(n, abs_info) else ""])
 
     out_xlsx = ROOT / f"attendance_{date_str}.xlsx"
     try:
@@ -113,11 +217,14 @@ def cmd_recognize(args):
         wb = Workbook()
         ws = wb.active
         ws.title = "考勤"
-        ws.append(["玩家名", "小队", "状态", "OCR文本", "相似度"])
+        ws.append(["玩家名", "小队", "状态", "OCR文本", "相似度", "连续缺席", "累计缺席", "建议清退"])
         for name, raw, score, status in results:
-            ws.append([name, squads.get(name, ""), "到场" if status == "ok" else "疑似", raw, score])
+            consec, cumul = abs_info.get(name, (0, 0))
+            ws.append([name, squads.get(name, ""), "到场" if status == "ok" else "疑似", raw, score,
+                       consec, cumul, "是" if kick_reason(name, abs_info) else ""])
         for n in absent:
-            ws.append([n, squads.get(n, ""), "未到场", "", ""])
+            consec, cumul = abs_info.get(n, (0, 0))
+            ws.append([n, squads.get(n, ""), "未到场", "", "", consec, cumul, "是" if kick_reason(n, abs_info) else ""])
         wb.save(out_xlsx)
     except Exception as e:
         print(f"[警告] 生成 xlsx 失败（CSV 已生成）：{e}")
@@ -133,6 +240,14 @@ def cmd_recognize(args):
         print(f"    ✓ {name}  (OCR「{raw}」 {score:.2f}){mark}")
     if absent:
         print("  未到场：", "、".join(absent))
+    if dates:
+        kicked = [n for n in known if kick_reason(n, abs_info)]
+        print(f"\n[清退建议] 已记录 {len(dates)} 场活动；触发清退（连续≥{CONSEC_KICK} 或 累计≥{SEASON_ABSENT_CAP}）：")
+        if kicked:
+            for n in kicked:
+                print(f"    ✗ {n} —— {kick_reason(n, abs_info)}")
+        else:
+            print("    暂无（都还安全）")
 
 
 def append_case(img_path, items, results, date_str):
@@ -174,6 +289,8 @@ def main():
     r.add_argument("image", help="截图路径")
     r.add_argument("--roster", default=str(ROSTER), help="名册 csv（默认 roster.csv）")
     r.add_argument("--date", default=None, help="活动日期 YYYY-MM-DD")
+    r.add_argument("--no-history", action="store_true",
+                   help="仅本次识别，不写入历史（不累积连续/累计缺席统计）")
     r.add_argument("--type", default="auto",
                    choices=["auto", "attendance_list", "starmap", "member_list"],
                    help="截图类型（默认 auto 自动判断）")

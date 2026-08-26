@@ -5,3 +5,5 @@ cases/export/
 .DS_Store
 # 本地案例库累积文件不入库（隐私/体积，用户自行导出回传）
 cases/cases.jsonl
+# 历史考勤记录不入库（含成员出勤隐私，仅存本地）
+history/
