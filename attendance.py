@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""拉格朗日考勤 · 开源版（考勤1.0 阉割引流版）主入口。
+"""拉格朗日考勤 · 开源版 主入口。
 
-功能（按完整度切，只留考勤核心）：
+功能（只保留考勤核心）：
   - 纯本地 OCR 识别名字（RapidOCR，零密钥）
   - 单格式：纯名字考勤截图（谁来了谁没来）
   - 输出 CSV + 一张本地表（xlsx）
-  - 案例库自动累积（cases/），可导出回传作者更新中心库
+  - 案例库自动累积（cases/），可导出样本与他人共享
 
 用法：
   python attendance.py recognize <截图.png> [--roster roster.csv] [--date 2026-08-26]
@@ -111,7 +111,7 @@ def cmd_cases(args):
             return
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             z.write(CASES_DB, "cases.jsonl")
-        print(f"[导出] 匿名案例包 → {out}（发给作者 sque-h 更新中心库）")
+        print(f"[导出] 匿名案例包 → {out}（可分享给他人共同改进识别）")
         return
     if not CASES_DB.exists():
         print("案例库为空")
