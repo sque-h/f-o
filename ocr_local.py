@@ -5,7 +5,8 @@
 来自考勤1.0 本地识别引擎。输入图片路径，输出文本块列表：
   [{"text":..., "score":..., "x":中心x, "y":中心y}, ...]
 """
-import cv2
+import numpy as np
+from PIL import Image
 
 try:
     from rapidocr_onnxruntime import RapidOCR
@@ -27,9 +28,13 @@ def get_engine():
 
 
 def ocr_image(path):
-    img = cv2.imread(path)
-    if img is None:
-        raise FileNotFoundError(f"无法读取图片：{path}")
+    # 用 Pillow 读图（支持中文路径），转 BGR numpy 数组后交给 RapidOCR，
+    # 避免 cv2.imread 在中文路径/文件名下读图失败。
+    try:
+        img = Image.open(path)
+        img = np.array(img.convert("RGB"))[:, :, ::-1].copy()
+    except Exception as e:
+        raise FileNotFoundError(f"无法读取图片：{path}（{e}）")
     result, _ = get_engine()(img)
     items = []
     for box, text, score in (result or []):
