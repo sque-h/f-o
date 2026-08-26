@@ -4,12 +4,13 @@
 
 功能：
   - 纯本地 OCR 识别名字（RapidOCR，零密钥）
-  - 单格式：纯名字考勤截图（谁来了谁没来）
+  - 单格式：活动考勤截图（谁来了谁没来）——支持纯名字名单图 与 集合点星图图片（自动判断）
   - 输出 CSV + 一张本地表（xlsx）
   - 案例库自动累积（cases/），可导出样本与他人共享
 
 用法：
-  python attendance.py recognize <截图.png> [--roster roster.csv] [--date 2026-08-26]
+  python attendance.py recognize <截图.png> [--roster roster.csv] [--type auto|starmap|attendance_list] [--date 2026-08-26]
+  python attendance.py build-roster <全盟截图1.png> [全盟截图2.png ...]
   python attendance.py cases --stats
   python attendance.py cases --export [out.zip]
 """
@@ -42,8 +43,18 @@ def load_roster(path):
 
 
 def cmd_build_roster(args):
-    items = ocr_local.ocr_image(args.image)
-    roster = pn.extract_roster(items, name_x_max=args.name_x_max)
+    roster = []
+    for img in args.images:
+        items = ocr_local.ocr_image(img)
+        roster += pn.extract_roster(items, name_x_max=args.name_x_max)
+    # 多张截图合并：按名字去重（保留首次出现），名单长分多张截自动拼
+    seen, merged = set(), []
+    for name, team in roster:
+        if name in seen:
+            continue
+        seen.add(name)
+        merged.append((name, team))
+    roster = merged
     out = Path(args.out)
     with open(out, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
@@ -66,9 +77,23 @@ def cmd_recognize(args):
     known, squads = load_roster(Path(args.roster))
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
     items = ocr_local.ocr_image(args.image)
-    results = pn.extract_names(
-        items, known, name_x_max=args.name_x_max, min_match=args.min_match
-    )
+
+    # 自动判断截图类型：纯名字名单 / 集合点星图（图片）/ 成员列表(应走 build-roster)
+    cls = args.type if args.type and args.type != "auto" else pn.classify(items)
+    if cls == "member_list":
+        print("\n[提示] 这张图是「成员列表」（含繁荣度/小队列头），"
+              "请改用 build-roster 生成名册；\n        或换一张活动到场截图"
+              "（纯名字名单 / 集合点星图）再 recognize。")
+        return
+    if cls == "starmap":
+        print("[识别] 检测到集合点星图，按星图模式提取名字…")
+        results = pn.extract_names_starmap(items, known, min_match=args.min_match)
+    else:
+        if cls == "attendance_list":
+            print("[识别] 检测到纯名字名单，按名单模式提取…")
+        results = pn.extract_names(
+            items, known, name_x_max=args.name_x_max, min_match=args.min_match
+        )
 
     present = {r[0] for r in results if r[3] == "ok"}
     absent = [n for n in known if n not in present]
@@ -145,11 +170,14 @@ def main():
     ap = argparse.ArgumentParser(description="拉格朗日考勤开源版：本地识别截图，自动统计谁来了谁没来")
     sub = ap.add_subparsers(dest="cmd")
 
-    r = sub.add_parser("recognize", help="识别一张纯名字考勤截图")
+    r = sub.add_parser("recognize", help="识别一张活动考勤截图（纯名字名单 / 集合点星图）")
     r.add_argument("image", help="截图路径")
     r.add_argument("--roster", default=str(ROSTER), help="名册 csv（默认 roster.csv）")
     r.add_argument("--date", default=None, help="活动日期 YYYY-MM-DD")
-    r.add_argument("--name-x-max", type=float, default=650, help="名字区域最大 x 坐标")
+    r.add_argument("--type", default="auto",
+                   choices=["auto", "attendance_list", "starmap", "member_list"],
+                   help="截图类型（默认 auto 自动判断）")
+    r.add_argument("--name-x-max", type=float, default=650, help="名字区域最大 x 坐标（名单模式用）")
     r.add_argument("--min-match", type=float, default=0.75)
 
     c = sub.add_parser("cases", help="案例库管理")
@@ -157,7 +185,7 @@ def main():
     c.add_argument("--stats", action="store_true")
 
     b = sub.add_parser("build-roster", help="从全盟截图一键生成名册（roster.csv）")
-    b.add_argument("image", help="全盟成员截图路径（成员列表或纯名字均可）")
+    b.add_argument("images", nargs="+", help="全盟成员截图路径（可多张，自动合并去重；成员列表或纯名字均可）")
     b.add_argument("--out", default=str(ROSTER), help="输出名册 csv（默认 roster.csv）")
     b.add_argument("--name-x-max", type=float, default=650, help="名字区域最大 x 坐标")
 

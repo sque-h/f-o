@@ -80,6 +80,89 @@ def extract_names(items, known, name_x_max=650, min_match=0.75):
     return results
 
 
+# ---- 截图类型识别（决定 recognize 走哪条提取路径）----
+# 移植自完整版 classify_screenshot.py，适配 RapidOCR 输出的 {text,x,y} 中心坐标。
+MEMBER_HEADERS = {"玩家名", "繁荣度", "周活跃度", "身份", "小队名称", "队伍类型", "小队"}
+COORD_RE = re.compile(r"坐标|\(\d{3,},\s*\d{3,}\)|\d{4,},\s*\d{4,}")
+FLEET_RE = re.compile(r"\d+号舰队|[一二三四五六七八九十百千]+号舰队")
+
+
+def classify(items):
+    """根据 OCR 文本块判断截图类型。items 为 ocr_local.ocr_image 输出。
+    返回 member_list / attendance_list / starmap / unknown。
+    """
+    texts = [(it.get("text", "").strip(), it.get("x", 0), it.get("y", 0))
+             for it in items if it.get("text")]
+    if not texts:
+        return "unknown"
+
+    headers_found = set()
+    for t, _, _ in texts:
+        for h in MEMBER_HEADERS:
+            if h in t:
+                headers_found.add(h)
+    header_score = len(headers_found)
+
+    num_pat = re.compile(r"^\d+(\.\d+)?万?$")
+    right_numbers = sum(
+        1 for t, xc, _ in texts
+        if xc >= 600 and num_pat.match(t.replace(",", "").replace("，", ""))
+    )
+    coord_hits = sum(1 for t, _, _ in texts if COORD_RE.search(t))
+    fleet_hits = sum(1 for t, _, _ in texts if FLEET_RE.search(t))
+
+    name_like = 0
+    for t, _, _ in texts:
+        if 2 <= len(t) <= 12 and not t.isdigit() and t not in NOISE:
+            name_like += 1
+
+    if header_score >= 2 or right_numbers >= 5:
+        return "member_list"
+    if fleet_hits >= 2 or coord_hits >= 2:
+        return "starmap"
+    if name_like >= 5 and right_numbers == 0 and header_score == 0:
+        return "attendance_list"
+    return "unknown"
+
+
+def extract_names_starmap(items, known, min_match=0.75):
+    """从集合点星图（图片）提取到场玩家名。
+
+    星图比纯名字截图噪：含坐标、舰队编号、星球/星系名等 UI 文字。
+    策略：过滤坐标/舰队/数值噪声 → 其余名字类文本与名册模糊匹配 → 命中即到场。
+    不限制 x 范围（星图名字分布在全图），靠名册匹配兜住误报。
+    返回 [(name, raw, score, status)]，与 extract_names 同构，可直接喂考勤流程。
+    """
+    candidates = []
+    for it in items:
+        t = apply_char_fix(it["text"]).strip()
+        if not (2 <= len(t) <= 12):
+            continue
+        if t.isdigit() or t in NOISE:
+            continue
+        if COORD_RE.search(t) or FLEET_RE.search(t):
+            continue
+        if _looks_like_number(t):
+            continue
+        if FIX_MAP.get(t):
+            t = FIX_MAP[t]
+        candidates.append((it["y"], t))
+
+    candidates.sort(key=lambda p: p[0])
+    seen = set()
+    results = []
+    for yc, t in candidates:
+        if t in seen:
+            continue
+        seen.add(t)
+        name, score = best_match(t, known)
+        if score >= min_match:
+            results.append((name, t, round(score, 2), "ok"))
+        elif score >= min_match - 0.15:
+            results.append((name or t, t, round(score, 2), "guess"))
+    return results
+
+
 # 身份列词（成员列表截图里紧跟名字右侧，但不是小队，提取名册时排除）
 IDENTITY = {"指挥官", "精英", "成员", "学员", "新兵", "管理者", "盟主", "副盟主",
             "军官", "领袖", "官员", "外交官", "政委", "参谋", "干事", "长老"}
