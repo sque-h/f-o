@@ -115,7 +115,7 @@ def extract_roster(items, name_x_max=650, y_tol=25):
     name_cands.sort()
 
     seen = set()
-    roster = []
+    raw = []
     for y, x, t in name_cands:
         if t in seen:
             continue
@@ -134,5 +134,10 @@ def extract_roster(items, name_x_max=650, y_tol=25):
             if dx < best_dx and 1 <= len(ti) <= 8:
                 best_dx = dx
                 team = ti
-        roster.append((t, team))
+        raw.append((t, team))
+
+    # 第二遍：剔除「小队标题行」。成员列表截图里小队名常作为分组标题独占一行，
+    # 同时它又是其成员的 team 值。收集所有 team → 已知小队名集，name 命中即剔除。
+    known_teams = {tm for _, tm in raw if tm}
+    roster = [(n, tm) for n, tm in raw if n not in known_teams]
     return roster
