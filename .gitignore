@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+cases/export/
+*.zip
+.DS_Store
+# 本地案例库累积文件不入库（隐私/体积，用户自行导出回传）
+cases/cases.jsonl
