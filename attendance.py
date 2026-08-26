@@ -41,6 +41,27 @@ def load_roster(path):
     return names, squads
 
 
+def cmd_build_roster(args):
+    items = ocr_local.ocr_image(args.image)
+    roster = pn.extract_roster(items, name_x_max=args.name_x_max)
+    out = Path(args.out)
+    with open(out, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["玩家名", "小队"])
+        for name, team in roster:
+            w.writerow([name, team])
+    print(f"\n[名册] 已从截图生成：{out}  共 {len(roster)} 人")
+    no_team = sum(1 for _, t in roster if not t)
+    if no_team:
+        print(f"  其中 {no_team} 人未识别到小队（纯名字截图无小队列），可手动补。")
+    print("  生成后请核对一眼，再跑 recognize 考勤。名册示例：")
+    for name, team in roster[:15]:
+        tag = f" · {team}" if team else ""
+        print(f"    {name}{tag}")
+    if len(roster) > 15:
+        print(f"    …（共 {len(roster)} 人，详见 {out}）")
+
+
 def cmd_recognize(args):
     known, squads = load_roster(Path(args.roster))
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
@@ -121,7 +142,7 @@ def cmd_cases(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="拉格朗日考勤开源版（考勤1.0 阉割引流版）")
+    ap = argparse.ArgumentParser(description="拉格朗日考勤开源版：本地识别截图，自动统计谁来了谁没来")
     sub = ap.add_subparsers(dest="cmd")
 
     r = sub.add_parser("recognize", help="识别一张纯名字考勤截图")
@@ -135,11 +156,18 @@ def main():
     c.add_argument("--export", default=None, help="导出匿名案例包 zip")
     c.add_argument("--stats", action="store_true")
 
+    b = sub.add_parser("build-roster", help="从全盟截图一键生成名册（roster.csv）")
+    b.add_argument("image", help="全盟成员截图路径（成员列表或纯名字均可）")
+    b.add_argument("--out", default=str(ROSTER), help="输出名册 csv（默认 roster.csv）")
+    b.add_argument("--name-x-max", type=float, default=650, help="名字区域最大 x 坐标")
+
     args = ap.parse_args()
     if args.cmd == "recognize":
         cmd_recognize(args)
     elif args.cmd == "cases":
         cmd_cases(args)
+    elif args.cmd == "build-roster":
+        cmd_build_roster(args)
     else:
         ap.print_help()
 

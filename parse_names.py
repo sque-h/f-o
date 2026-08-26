@@ -5,6 +5,7 @@
 单格式：纯名字考勤截图（纵向排列玩家名，无数字列）。
 逻辑：左侧名字区筛选 → 长度/噪声过滤 → 形近字纠正 → 比名册。
 """
+import re
 from difflib import SequenceMatcher
 
 # 逐字纠正（OCR 把单字读成形近/同音字）
@@ -77,3 +78,61 @@ def extract_names(items, known, name_x_max=650, min_match=0.75):
         elif score >= min_match - 0.15:
             results.append((name or t, t, round(score, 2), "guess"))
     return results
+
+
+# 身份列词（成员列表截图里紧跟名字右侧，但不是小队，提取名册时排除）
+IDENTITY = {"指挥官", "精英", "成员", "学员", "新兵", "管理者", "盟主", "副盟主",
+            "军官", "领袖", "官员", "外交官", "政委", "参谋", "干事", "长老"}
+
+# 像繁荣度/周活跃度的数值文本（含「万」、含小数点、纯数字），提取名册时排除
+_NUMISH = re.compile(r"万|\d\.\d|\d+(\.\d+)?\s*万?")
+
+
+def _looks_like_number(t):
+    if t.isdigit():
+        return True
+    return bool(_NUMISH.search(t))
+
+
+def extract_roster(items, name_x_max=650, y_tol=25):
+    """从全盟截图一键提取名册（玩家名 + 小队）。
+
+    兼容两种截图，无需分支：
+      - 成员列表截图（含「玩家名 + 小队名称」列）→ 名字在左列，小队在同行右侧
+      - 纯名字截图（无小队列）→ 右侧无文本，小队留空
+    返回 [(name, team), ...]，team 为空表示截图里没有小队信息。
+    """
+    name_cands = []
+    for it in items:
+        t = apply_char_fix(it["text"]).strip()
+        if not (2 <= len(t) <= 12):
+            continue
+        if it["x"] > name_x_max:
+            continue
+        if t.isdigit() or t in NOISE:
+            continue
+        name_cands.append((it["y"], it["x"], t))
+    name_cands.sort()
+
+    seen = set()
+    roster = []
+    for y, x, t in name_cands:
+        if t in seen:
+            continue
+        seen.add(t)
+        team = ""
+        best_dx = 10 ** 9
+        for it in items:
+            ti = apply_char_fix(it["text"]).strip()
+            if ti.isdigit() or ti in NOISE or ti in IDENTITY or _looks_like_number(ti):
+                continue
+            if abs(it["y"] - y) > y_tol:
+                continue
+            if it["x"] <= x:
+                continue
+            dx = it["x"] - x
+            if dx < best_dx and 1 <= len(ti) <= 8:
+                best_dx = dx
+                team = ti
+        roster.append((t, team))
+    return roster
