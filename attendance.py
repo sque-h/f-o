@@ -139,7 +139,7 @@ def cmd_build_roster(args):
     for img in args.images:
         items = ocr_local.ocr_image(img)
         roster += pn.extract_roster(items, name_x_max=args.name_x_max)
-    # 多张截图合并：按名字去重（保留首次出现），名单长分多张截自动拼
+    # 本次多张截图合并：按名字去重（保留首次出现），名单长分多张截自动拼
     seen, merged = set(), []
     for name, team in roster:
         if name in seen:
@@ -148,6 +148,18 @@ def cmd_build_roster(args):
         merged.append((name, team))
     roster = merged
     out = Path(args.out)
+    # 与已有名册合并（默认追加，不覆盖）：分多次传图 / 反复生成也不会丢人
+    if getattr(args, "merge", True) and out.exists():
+        old_names, old_teams = load_roster(out)
+        old = {n: old_teams.get(n, "") for n in old_names}
+        added = 0
+        for name in old_names:
+            if name not in seen:
+                seen.add(name)
+                merged.append((name, old[name]))
+                added += 1
+        if added:
+            print(f"  [合并] 已从已有名册保留 {added} 人（本次新增/更新 {len(roster) - added} 人）")
     with open(out, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["玩家名", "小队"])
@@ -304,6 +316,10 @@ def main():
     b = sub.add_parser("build-roster", help="从全盟截图一键生成名册（roster.csv）")
     b.add_argument("images", nargs="+", help="全盟成员截图路径（可多张，自动合并去重；成员列表或纯名字均可）")
     b.add_argument("--out", default=str(ROSTER), help="输出名册 csv（默认 roster.csv）")
+    b.add_argument("--merge", action="store_true", default=True,
+                   help="与已有 roster.csv 合并追加（默认）；分多次传图也不会丢人")
+    b.add_argument("--overwrite", dest="merge", action="store_false",
+                   help="覆盖已有 roster.csv 重建（清空旧名册从头来）")
     b.add_argument("--name-x-max", type=float, default=650, help="名字区域最大 x 坐标")
 
     args = ap.parse_args()

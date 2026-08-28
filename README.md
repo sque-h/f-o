@@ -40,11 +40,16 @@ pip install -r requirements.txt
 python attendance.py build-roster 全盟截图.png
 ```
 
-会自动生成 `roster.csv`（玩家名 + 小队）。生成后请核对一眼：删掉不是成员的行、补上空缺的小队即可。
+会自动生成 `roster.csv`（玩家名 + 小队）。生成后请核对一眼：OCR 偶有形近字误差，改错字即可。
+
+> **不会丢人**：`build-roster` 默认与已有 `roster.csv` **合并追加**，分多次传图也不会覆盖之前的人。
+> 要彻底重来，加 `--overwrite`：`python attendance.py build-roster 全盟截图.png --overwrite`
 
 **方式 B：手动填写**
 
 直接编辑 `roster.csv`，按 `玩家名,小队` 格式逐行填入成员（适合名单很少、或不想截图的情况）。
+
+**一键版 GUI 用户**：第 1.5 步「手动编辑 / 录入名册」卡片里可以直接在网页增删改名字和小队并保存；想纯手填不截图也行。
 
 ### 第二步：考勤打卡
 

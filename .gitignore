@@ -7,3 +7,11 @@ cases/export/
 cases/cases.jsonl
 # 历史考勤记录不入库（含成员出勤隐私，仅存本地）
 history/
+# PyInstaller 打包产物（体积大，不入库；exe 单独分发）
+dist/
+build/
+*.spec.bak
+# 自检/临时产物
+roster.csv.selftest.bak
+_up_*.png
+_up_*.png
