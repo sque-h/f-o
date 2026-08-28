@@ -107,9 +107,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   <div class="card">
     <h2>第 2 步 · 考勤打卡</h2>
-    <div class="step">每次活动截一张图（纯名字名单 / 集合点星图均可，自动判断）。
-      选图 + 填活动日期 → 自动比对名册，出结果表和累计缺席统计。</div>
-    <input type="file" id="attFile" accept="image/*">
+    <div class="step">选本次活动的活动截图（<b>可多选</b>：纯名字名单 / 集合点星图均可，自动判断类型）。
+      <br><b>为什么要多张</b>：游戏里一张截图基本截不全——全盟名单要分多张（或长截图），集合点星图更要每队各截一张才覆盖全员。一次选多张，工具自动<b>合并到场名单</b>，不会互相覆盖。
+      <br>选图 + 填活动日期 → 自动比对名册，出结果表和累计缺席统计。</div>
+    <input type="file" id="attFile" accept="image/*" multiple>
     <div style="margin:8px 0">活动日期：<input type="date" id="attDate"></div>
     <button onclick="recognize()">开始考勤</button>
     <label style="margin-left:10px;font-size:12px;color:#9fb0c8">
@@ -191,14 +192,15 @@ async function saveRoster(){
 }
 
 async function recognize(){
-  const f=document.getElementById('attFile').files[0];
-  if(!f){show('attResult','请先选择活动截图','warn');return;}
+  const files=document.getElementById('attFile').files;
+  if(!files.length){show('attResult','请先选择活动截图（可多选）','warn');return;}
+  const imgs=[];for(const f of files){imgs.push({name:f.name,data:await b64(f)});}
   const date=document.getElementById('attDate').value||'';
   const noH=document.getElementById('noHistory').checked;
-  show('attResult','识别中…');
-  const j=await postJSON('/api/recognize',{image:{name:f.name,data:await b64(f)},date:date,no_history:noH});
+  show('attResult','识别中…（'+(imgs.length>1?imgs.length+' 张图合并中…':'')+'首次可能需十几秒加载模型）');
+  const j=await postJSON('/api/recognize',{images:imgs,date:date,no_history:noH});
   if(j.ok){let h='✅ '+j.date+'　到场 <b>'+j.present.length+'</b> / 名册 <b>'+j.total+
-    '</b>　未到场 <b>'+j.absent.length+'</b><br>'+
+    '</b>　未到场 <b>'+j.absent.length+'</b>'+(j.images?('（共 '+j.images+' 张图）'):'')+'<br>'+
     '<a class="dl" href="/download?f='+encodeURIComponent(j.xlsx)+'">下载 Excel 表</a> '+
     '<a class="dl" href="/download?f='+encodeURIComponent(j.csv)+'">下载 CSV</a><br><br>';
     if(j.present.length){h+='<span class="ok">到场：</span><br>'+j.present.map(n=>'✓ '+n).join('、')+'<br><br>';}
@@ -291,16 +293,20 @@ def do_save_roster(rows):
     return {"ok": True, "count": len(cleaned)}
 
 
-def do_recognize(image_b64, date, no_history):
-    p = BASE / "_up_att.png"
-    p.write_bytes(base64.b64decode(image_b64["data"]))
+def do_recognize(images_b64, date, no_history):
+    paths = []
+    for i, im in enumerate(images_b64):
+        p = BASE / f"_up_att_{i}.png"
+        p.write_bytes(base64.b64decode(im["data"]))
+        paths.append(str(p))
     args = argparse.Namespace(
-        image=str(p), roster=str(app.ROSTER), date=(date or None),
+        images=paths, roster=str(app.ROSTER), date=(date or None),
         no_history=bool(no_history), type="auto", name_x_max=650.0, min_match=0.75,
     )
     log = _capture_stdout(app.cmd_recognize, args)
-    try: os.remove(p)
-    except OSError: pass
+    for p in paths:
+        try: os.remove(p)
+        except OSError: pass
     # 读取生成的考勤结果
     import csv
     known = _load_roster_names()
@@ -322,6 +328,7 @@ def do_recognize(image_b64, date, no_history):
     return {
         "ok": True, "date": date_str, "total": len(known),
         "present": present, "absent": absent, "kicked": kicked,
+        "images": len(images_b64),
         "csv": csv_path.name if csv_path.exists() else "",
         "xlsx": xlsx_path.name if xlsx_path.exists() else "",
         "log": log,
@@ -394,7 +401,7 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/roster_save":
                 res = do_save_roster(payload.get("rows", []))
             elif u.path == "/api/recognize":
-                res = do_recognize(payload.get("image", {}), payload.get("date", ""),
+                res = do_recognize(payload.get("images", []), payload.get("date", ""),
                                    payload.get("no_history", False))
             elif u.path == "/api/export":
                 res = do_export_cases()
@@ -439,7 +446,7 @@ def selftest(roster_img=None, att_img=None):
         print("=== 自检：真实截图流程 ===")
         r = do_build_roster([{"name": "m.png", "data": base64.b64encode(Path(roster_img).read_bytes()).decode()}])
         print("  build-roster:", r["count"], "人", "OK" if r["ok"] else r.get("error"))
-        a = do_recognize({"name": "a.png", "data": base64.b64encode(Path(att_img).read_bytes()).decode()}, "", False)
+        a = do_recognize([{"name": "a.png", "data": base64.b64encode(Path(att_img).read_bytes()).decode()}], "", False)
         print("  recognize: 到场", len(a["present"]), "/ 名册", a["total"], "OK" if a["ok"] else a.get("error"))
     print("=== 自检完成 ===")
 

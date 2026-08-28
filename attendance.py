@@ -180,24 +180,40 @@ def cmd_build_roster(args):
 def cmd_recognize(args):
     known, squads = load_roster(Path(args.roster))
     date_str = args.date or datetime.now().strftime("%Y-%m-%d")
-    items = ocr_local.ocr_image(args.image)
+    # 支持多张活动截图（集合点星图往往要截好几张才覆盖全联盟）
+    images = args.images if isinstance(args.images, (list, tuple)) else [args.images]
 
-    # 自动判断截图类型：纯名字名单 / 集合点星图（图片）/ 成员列表(应走 build-roster)
-    cls = args.type if args.type and args.type != "auto" else pn.classify(items)
-    if cls == "member_list":
-        print("\n[提示] 这张图是「成员列表」（含繁荣度/小队列头），"
-              "请改用 build-roster 生成名册；\n        或换一张活动到场截图"
-              "（纯名字名单 / 集合点星图）再 recognize。")
+    all_results = []          # 每张图提取出的 (name, raw, score, status) 汇总
+    for idx, img in enumerate(images, 1):
+        items = ocr_local.ocr_image(img)
+        # 自动判断截图类型：纯名字名单 / 集合点星图（图片）/ 成员列表(应走 build-roster)
+        cls = args.type if args.type and args.type != "auto" else pn.classify(items)
+        if cls == "member_list":
+            print(f"\n[提示] 第 {idx} 张图是「成员列表」（含繁荣度/小队列头），"
+                  "已跳过；请改用 build-roster 生成名册，或换一张活动到场截图"
+                  "（纯名字名单 / 集合点星图）。")
+            continue
+        if cls == "starmap":
+            print(f"[识别] 第 {idx} 张：检测到集合点星图，按星图模式提取名字…")
+            results = pn.extract_names_starmap(items, known, min_match=args.min_match)
+        else:
+            if cls == "attendance_list":
+                print(f"[识别] 第 {idx} 张：检测到纯名字名单，按名单模式提取…")
+            results = pn.extract_names(
+                items, known, name_x_max=args.name_x_max, min_match=args.min_match
+            )
+        all_results.extend(results)
+        append_case(img, items, results, date_str)
+
+    # 多张图合并：同一玩家名取最高相似度的那条；任一图识别为「ok」即算到场
+    combined = {}
+    for name, raw, score, status in all_results:
+        if name not in combined or score > combined[name][1]:
+            combined[name] = (raw, score, status)
+    results = [(n, raw, score, status) for n, (raw, score, status) in combined.items()]
+    if not results:
+        print("\n[考勤] 没有从截图里识别出任何到场成员（可能全是成员列表图，或名册为空）。")
         return
-    if cls == "starmap":
-        print("[识别] 检测到集合点星图，按星图模式提取名字…")
-        results = pn.extract_names_starmap(items, known, min_match=args.min_match)
-    else:
-        if cls == "attendance_list":
-            print("[识别] 检测到纯名字名单，按名单模式提取…")
-        results = pn.extract_names(
-            items, known, name_x_max=args.name_x_max, min_match=args.min_match
-        )
 
     present = {r[0] for r in results if r[3] == "ok"}
     absent = [n for n in known if n not in present]
@@ -240,8 +256,6 @@ def cmd_recognize(args):
         wb.save(out_xlsx)
     except Exception as e:
         print(f"[警告] 生成 xlsx 失败（CSV 已生成）：{e}")
-
-    append_case(args.image, items, results, date_str)
 
     print(f"\n[考勤] {date_str}  到场 {len(present)} / 名册 {len(known)}，未到场 {len(absent)}")
     print(f"  CSV : {out_csv}")
@@ -297,8 +311,8 @@ def main():
     ap = argparse.ArgumentParser(description="拉格朗日考勤开源版：本地识别截图，自动统计谁来了谁没来")
     sub = ap.add_subparsers(dest="cmd")
 
-    r = sub.add_parser("recognize", help="识别一张活动考勤截图（纯名字名单 / 集合点星图）")
-    r.add_argument("image", help="截图路径")
+    r = sub.add_parser("recognize", help="识别活动考勤截图（纯名字名单 / 集合点星图，可多张）")
+    r.add_argument("images", nargs="+", help="活动截图路径（可多张，集合点星图常需截好几张；自动合并到场名单）")
     r.add_argument("--roster", default=str(ROSTER), help="名册 csv（默认 roster.csv）")
     r.add_argument("--date", default=None, help="活动日期 YYYY-MM-DD")
     r.add_argument("--no-history", action="store_true",
