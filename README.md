@@ -96,4 +96,4 @@ python attendance.py cases --export case.zip # 导出样本包
 
 个人非商用免费，商用或转售需作者授权。详见 [LICENSE](LICENSE)。
 
-作者：侯宇飞 · 微信：**Chill_Thinker**（手机 19518388916 同号可搜）· GitHub: sque-h
+作者：飓人皇 · 微信：**Chill_Thinker**（手机 19518388916 同号可搜）· GitHub: sque-h
