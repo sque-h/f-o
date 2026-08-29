@@ -59,7 +59,7 @@ def extract_names(items, known, name_x_max=650, min_match=0.75):
             continue
         if it["x"] > name_x_max:
             continue
-        if t.isdigit() or t in NOISE:
+        if t.isdigit() or t in NOISE or _is_prosperity_like(t):
             continue
         if FIX_MAP.get(t):
             t = FIX_MAP[t]
@@ -167,14 +167,22 @@ def extract_names_starmap(items, known, min_match=0.75):
 IDENTITY = {"指挥官", "精英", "成员", "学员", "新兵", "管理者", "盟主", "副盟主",
             "军官", "领袖", "官员", "外交官", "政委", "参谋", "干事", "长老"}
 
-# 像繁荣度/周活跃度的数值文本（含「万」、含小数点、纯数字），提取名册时排除
-_NUMISH = re.compile(r"万|\d\.\d|\d+(\.\d+)?\s*万?")
+# 像繁荣度/周活跃度的数值文本（含「万」、含小数点、纯数字），提取名册时排除。
+# 用 fullmatch 锚定：整串都是数值才判为数值，避免误杀带数字的真名字（如「开拓者595117」）。
+_NUMISH = re.compile(r"^[\d,]+(\.\d+)?\s*万?$")
 
 
 def _looks_like_number(t):
     if t.isdigit():
         return True
-    return bool(_NUMISH.search(t))
+    return bool(_NUMISH.fullmatch(t))
+
+
+# 繁荣度数值的特征：整串是数值，或含有「万」（游戏里繁荣度恒带「万」，玩家名几乎不含）。
+def _is_prosperity_like(t):
+    if "万" in t:
+        return True
+    return _looks_like_number(t)
 
 
 def extract_roster(items, name_x_max=650, y_tol=25):
@@ -192,7 +200,7 @@ def extract_roster(items, name_x_max=650, y_tol=25):
             continue
         if it["x"] > name_x_max:
             continue
-        if t.isdigit() or t in NOISE:
+        if t.isdigit() or t in NOISE or _is_prosperity_like(t):
             continue
         name_cands.append((it["y"], it["x"], t))
     name_cands.sort()
@@ -207,7 +215,7 @@ def extract_roster(items, name_x_max=650, y_tol=25):
         best_dx = 10 ** 9
         for it in items:
             ti = apply_char_fix(it["text"]).strip()
-            if ti.isdigit() or ti in NOISE or ti in IDENTITY or _looks_like_number(ti):
+            if ti.isdigit() or ti in NOISE or ti in IDENTITY or _is_prosperity_like(ti):
                 continue
             if abs(it["y"] - y) > y_tol:
                 continue
