@@ -52,26 +52,17 @@ def extract_names(items, known, name_x_max=650, min_match=0.75):
     """items: ocr_local.ocr_image 输出。known: 名册名列表。
     返回 [(name, raw, score, status)]，status ∈ {ok, guess}。
     """
-    candidates = []
-    for it in items:
-        t = apply_char_fix(it["text"]).strip()
-        if not (2 <= len(t) <= 12):
-            continue
-        if it["x"] > name_x_max:
-            continue
-        if t.isdigit() or t in NOISE or _is_prosperity_like(t):
-            continue
-        if FIX_MAP.get(t):
-            t = FIX_MAP[t]
-        candidates.append((it["y"], t))
-
-    candidates.sort(key=lambda p: p[0])
+    merged = _merge_wrapped(items, name_x_max)
+    candidates = [(y, t) for y, x, t in merged]
+    candidates.sort()
     seen = set()
     results = []
     for yc, t in candidates:
         if t in seen:
             continue
         seen.add(t)
+        if FIX_MAP.get(t):
+            t = FIX_MAP[t]
         name, score = best_match(t, known)
         if score >= min_match:
             results.append((name, t, round(score, 2), "ok"))
@@ -136,7 +127,9 @@ def extract_names_starmap(items, known, min_match=0.75):
     candidates = []
     for it in items:
         t = apply_char_fix(it["text"]).strip()
-        if not (2 <= len(t) <= 12):
+        if len(t) < 1 or len(t) > 12:
+            continue
+        if len(t) == 1 and (not _CJK.match(t) or t in SINGLE_NOISE):
             continue
         if t.isdigit() or t in NOISE:
             continue
@@ -185,7 +178,123 @@ def _is_prosperity_like(t):
     return _looks_like_number(t)
 
 
-def extract_roster(items, name_x_max=650, y_tol=25):
+# ---- 小队名识别增强（小队名含数字时易误读，如「6队」被读成「b队」）----
+SQUAD_VOCAB = ["一队", "二队", "三队", "四队", "五队", "七队", "八队",
+               "九队", "十队", "6队", "罗马集团", "AUG"]
+# 阿拉伯/中文数字互转（六→6，陆→6）
+CN_NUM = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5", "六": "6",
+          "陆": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+# OCR 把数字读成形近字母的常见混淆
+DIGIT_CONFUSE = {"b": "6", "B": "8", "o": "0", "O": "0", "l": "1", "I": "1",
+                 "S": "5", "Z": "2", "q": "9", "g": "9", "t": "1"}
+
+
+def _norm_squad_text(t):
+    t = t.strip()
+    out = []
+    for ch in t:
+        out.append(DIGIT_CONFUSE.get(ch, ch))
+    t = "".join(out)
+    for k, v in CN_NUM.items():
+        t = t.replace(k, v)
+    return t.replace(" ", "")
+
+
+def _load_squad_vocab():
+    """小队名词表 = 内置常见 + 用户已建名册里的真实小队名（更准）。
+    名册里的小队名也做数字归一（六队→6队），保证与内置词表口径一致。
+    """
+    vocab = list(SQUAD_VOCAB)
+    try:
+        import csv
+        with open("roster.csv", encoding="utf-8-sig", newline="") as fh:
+            for row in csv.reader(fh):
+                if len(row) >= 3 and row[2].strip():
+                    vocab.append(_norm_squad_text(row[2].strip()))
+    except OSError:
+        pass
+    return list(dict.fromkeys(vocab))
+
+
+def normalize_squad(tok, vocab):
+    """把 OCR 出的小队名归一化到词表。命中即返回规范名；否则保留原样。"""
+    if not tok:
+        return ""
+    if tok in vocab:
+        return tok
+    t = _norm_squad_text(tok)
+    if t in vocab:
+        return t
+    # 词表本身也按归一化形式比对（六队/6队 视为同一）
+    norm_vocab = {_norm_squad_text(v): v for v in vocab}
+    if t in norm_vocab:
+        return norm_vocab[t]
+    best, score = "", 0.0
+    for nv, v in norm_vocab.items():
+        s = SequenceMatcher(None, t, nv).ratio()
+        if s > score:
+            best, score = v, s
+    return best if score >= 0.5 else tok
+
+
+# 单字白名单外的 UI 杂字（出现在名字列但不是名字）
+SINGLE_NOISE = {"队", "盟", "名", "列", "小", "大", "中", "长", "玩", "家",
+                "身", "份", "繁", "荣", "度", "周", "活", "跃", "类", "型",
+                "本", "页", "上", "下", "左", "右", "全", "员"}
+_CJK = re.compile(r"^[\u4e00-\u9fff]+$")
+
+
+def _is_name_fragment(t):
+    """该文本是否可能作为「名字片段」参与竖屏换行合并 / 候选。"""
+    if not t:
+        return False
+    if t.isdigit() or t in NOISE or _is_prosperity_like(t):
+        return False
+    if len(t) > 12:
+        return False
+    if len(t) == 1 and (not _CJK.match(t) or t in SINGLE_NOISE):
+        return False
+    return True
+
+
+def _merge_wrapped(items, name_x_max):
+    """合并名字列内因竖屏换行被拆成两行的玩家名。
+
+    竖屏（或窄列）截图里一个玩家名可能折成两行 OCR 文本；二者同在名字列、
+    纵向相邻、第二片段较短。合并后还原真名，避免被当成两个名字。
+    返回按 y 排序的 [(y, x, text)]。
+    """
+    frags = []
+    for it in items:
+        t = apply_char_fix(it["text"]).strip()
+        if it["x"] > name_x_max:
+            continue
+        if not _is_name_fragment(t):
+            continue
+        frags.append((it["y"], it["x"], t))
+    frags.sort()
+    if len(frags) < 2:
+        return frags
+    ys = [f[0] for f in frags]
+    gaps = sorted(ys[i + 1] - ys[i] for i in range(len(ys) - 1) if ys[i + 1] - ys[i] > 0)
+    med_gap = gaps[len(gaps) // 2] if gaps else 30
+    merged, i = [], 0
+    while i < len(frags):
+        y, x, t = frags[i]
+        if i + 1 < len(frags):
+            y2, x2, t2 = frags[i + 1]
+            dy = y2 - y
+            if (dy > 0 and dy < 0.75 * med_gap and abs(x2 - x) < 40
+                    and len(t2) <= 8 and len(t) + len(t2) <= 12):
+                merged.append((y, min(x, x2), t + t2))
+                i += 2
+                continue
+        merged.append((y, x, t))
+        i += 1
+    return merged
+
+
+def extract_roster(items, name_x_max=650, y_tol=25, squad_vocab=None):
     """从全盟截图一键提取名册（玩家名 + 小队）。
 
     兼容两种截图，无需分支：
@@ -193,21 +302,12 @@ def extract_roster(items, name_x_max=650, y_tol=25):
       - 纯名字截图（无小队列）→ 右侧无文本，小队留空
     返回 [(name, team), ...]，team 为空表示截图里没有小队信息。
     """
-    name_cands = []
-    for it in items:
-        t = apply_char_fix(it["text"]).strip()
-        if not (2 <= len(t) <= 12):
-            continue
-        if it["x"] > name_x_max:
-            continue
-        if t.isdigit() or t in NOISE or _is_prosperity_like(t):
-            continue
-        name_cands.append((it["y"], it["x"], t))
-    name_cands.sort()
-
+    if squad_vocab is None:
+        squad_vocab = _load_squad_vocab()
+    merged = _merge_wrapped(items, name_x_max)
     seen = set()
     raw = []
-    for y, x, t in name_cands:
+    for y, x, t in merged:
         if t in seen:
             continue
         seen.add(t)
@@ -225,6 +325,10 @@ def extract_roster(items, name_x_max=650, y_tol=25):
             if dx < best_dx and 1 <= len(ti) <= 8:
                 best_dx = dx
                 team = ti
+        team = normalize_squad(team, squad_vocab) if team else ""
+        # 单字名若截图上没有小队（纯名字截图/UI杂字）则丢弃，避免污染名册
+        if len(t) == 1 and not team:
+            continue
         raw.append((t, team))
 
     # 第二遍：剔除「小队标题行」。成员列表截图里小队名常作为分组标题独占一行，
