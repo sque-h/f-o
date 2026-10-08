@@ -1,17 +1,28 @@
 __pycache__/
 *.pyc
-cases/export/
-*.zip
 .DS_Store
+*.zip
+
 # 本地案例库累积文件不入库（隐私/体积，用户自行导出回传）
 cases/cases.jsonl
+cases/export/
+
 # 历史考勤记录不入库（含成员出勤隐私，仅存本地）
 history/
-# PyInstaller 打包产物（体积大，不入库；exe 单独分发）
+
+# 识别结果输出（含成员出勤隐私，不入库）
+attendance_*.csv
+attendance_*.xlsx
+
+# 本地依赖安装标记（启动脚本用）
+.deps_ok
+
+# 打包产物（体积大，不入库）
 dist/
+dist_*/
 build/
+build_*/
+拉格朗日考勤一键版/
 *.spec.bak
-# 自检/临时产物
 roster.csv.selftest.bak
-_up_*.png
-_up_*.png
+_up_*

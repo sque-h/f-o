@@ -8,25 +8,16 @@
 import re
 from difflib import SequenceMatcher
 
-# 逐字纠正（OCR 把单字读成形近/同音字）
+# 逐字纠正（OCR 把单字读成形近/同音字）。
+# 这里只留通用噪声：竖线常被 OCR 误认成一个汉字，直接去掉。
+# 想针对你自己的名册纠错，按 {"错字": "正字"} 往下加即可。
 CHAR_FIX = {
-    "焓": "晗", "I": "", "丨": "", "|": "",
-    "盔": "盈", "壮": "社", "擎": "攀",
-    "星": "心", "王": "主", "寞": "冥",
-    "O": "D", "o": "d", "0": "D",
+    "丨": "", "|": "",
 }
-# 整词纠正（OCR 把整词读成另一个常见错误形式时，直接映射回名册名）
+# 整词纠正：OCR 把整个词读成另一种写法时，直接映射回名册里的正确名。
+# 留空不影响使用；需要时照下面格式填你自己的：
+#     "OCR 读出来的错名": "名册里的正确名",
 FIX_MAP = {
-    "希灵I清风": "希灵清风",
-    "许盔": "许盈",
-    "粗口壮熊福瑞": "粗口社熊福瑞",
-    "超擎": "超攀",
-    "策星无畏": "策心无畏",
-    "神豆国王": "神豆国主",
-    "开拓者715624": "开拓者574162",
-    "幽寞冥神王幽冥神王": "幽冥神王",
-    "旧日愚者旧日患者": "旧日愚者",
-    "灯火阑珊口灯火阑珊": "灯火阑珊o",
 }
 
 NOISE = {
@@ -37,6 +28,30 @@ NOISE = {
 
 def apply_char_fix(text):
     return "".join(CHAR_FIX.get(ch, ch) for ch in text)
+
+
+_NORM_KEY_RE = re.compile(r"[^\w\u4e00-\u9fff]")
+
+
+def _norm_key(s):
+    """只留字母数字和汉字，用来判断「原文是不是已经能对上名册」。"""
+    return _NORM_KEY_RE.sub("", str(s).strip().lower())
+
+
+def raw_hits_roster(raw, known):
+    """原文本身就能对上名册（精确命中，或已含某个完整名）→ 不必再做形近字纠正。
+
+    这样既能保住全大写 ID、带数字 ID 这类真名，又不影响真正读错字时的纠正。
+    """
+    t = str(raw).strip()
+    if not t:
+        return False
+    if t in known:
+        return True
+    nt = _norm_key(t)
+    if not nt:
+        return False
+    return any(len(nk) >= 2 and nk in nt for nk in (_norm_key(k) for k in known))
 
 
 def best_match(name, known):
@@ -72,10 +87,18 @@ def extract_names(items, known, name_x_max=650, min_match=0.75):
 
 
 # ---- 截图类型识别（决定 recognize 走哪条提取路径）----
-# 移植自完整版 classify_screenshot.py，适配 RapidOCR 输出的 {text,x,y} 中心坐标。
+# 移植自完整版 classify_screenshot.py，适配本地 PP-OCRv6 输出的 {text,x,y} 中心坐标。
 MEMBER_HEADERS = {"玩家名", "繁荣度", "周活跃度", "身份", "小队名称", "队伍类型", "小队"}
 COORD_RE = re.compile(r"坐标|\(\d{3,},\s*\d{3,}\)|\d{4,},\s*\d{4,}")
 FLEET_RE = re.compile(r"\d+号舰队|[一二三四五六七八九十百千]+号舰队")
+# 建造/资源类界面文字：整段是 UI 时不能拿去比对名册，
+# 否则「建造计划(1D)」这种会被名册里的短名「1D」误命中（误报为到场）。
+UI_TEXT_RE = re.compile(
+    r"建造|计划|前哨站|队列|解构|晶体|金属|重氢|采矿|采集|研究|升级|"
+    r"资源|坐标|支援|集结|筛选|篩选|行动目标|倒计时|完成度"
+)
+# 「7/10」「7/1D」这类进度/数量写法（建造队列、资源进度），不是名字
+PROGRESS_RE = re.compile(r"^[0-9A-Za-z. ]{1,4}/[0-9A-Za-z. ]{1,8}$")
 
 
 def classify(items):
@@ -126,7 +149,12 @@ def extract_names_starmap(items, known, min_match=0.75):
     """
     candidates = []
     for it in items:
-        t = apply_char_fix(it["text"]).strip()
+        orig = str(it["text"]).strip()
+        if orig.isdigit() or _looks_like_number(orig) or _is_prosperity_like(orig):
+            continue
+        if PROGRESS_RE.match(orig) or COORD_RE.search(orig):
+            continue
+        t = orig if raw_hits_roster(orig, known) else apply_char_fix(orig).strip()
         if len(t) < 1 or len(t) > 12:
             continue
         if len(t) == 1 and (not _CJK.match(t) or t in SINGLE_NOISE):
@@ -134,6 +162,10 @@ def extract_names_starmap(items, known, min_match=0.75):
         if t.isdigit() or t in NOISE:
             continue
         if COORD_RE.search(t) or FLEET_RE.search(t):
+            continue
+        if UI_TEXT_RE.search(t):
+            continue
+        if PROGRESS_RE.match(t):
             continue
         if _looks_like_number(t):
             continue
@@ -153,6 +185,85 @@ def extract_names_starmap(items, known, min_match=0.75):
             results.append((name, t, round(score, 2), "ok"))
         elif score >= min_match - 0.15:
             results.append((name or t, t, round(score, 2), "guess"))
+    return results
+
+
+def extract_names_owner_labels(items, known, min_match=0.75):
+    """新版星图（舰队所属人名）提取。
+
+    2026-09 游戏更新后，星图会直接把舰队所有者名字标在舰队旁边；
+    名字可能互相重叠成一段长文本（两个名字挤在一起，中间没有任何分隔）。
+    策略：
+      1) OCR 文本先去掉坐标/舰队编号/繁荣度等 UI 噪声；
+      2) 若一段文本里包含名册全名，按包含关系拆出人名；
+         同一段里长名包含短名时只保留长名（避免把长名的一截误算成另一个人）；
+      3) 没有包含命中时再用相似度匹配。
+    返回 [(name, raw, score, status)]，与 extract_names 同构。
+    """
+    seen = set()
+    results = []
+
+    def norm(s):
+        return re.sub(r"[^\w\u4e00-\u9fff]", "", str(s).strip().lower())
+
+    known_norm = [(k, norm(k)) for k in known if norm(k)]
+    for it in items:
+        orig = str(it.get("text", "")).strip()
+        # 先用「原始 OCR 文本」判数字/进度类界面文字：形近字纠正会把 0/O 读成 D，
+        # 纠正之后再判就认不出来了（例：「1030」会被纠成「1D3D」，进而命中名册里的短名）
+        if orig.isdigit() or _looks_like_number(orig) or _is_prosperity_like(orig):
+            continue
+        if PROGRESS_RE.match(orig) or COORD_RE.search(orig):
+            continue
+        raw = orig if raw_hits_roster(orig, known) else apply_char_fix(orig).strip()
+        if not raw or len(raw) > 30:
+            continue
+        if raw in NOISE or raw.isdigit() or _looks_like_number(raw) or _is_prosperity_like(raw):
+            continue
+        if COORD_RE.search(raw) or FLEET_RE.search(raw):
+            continue
+        if UI_TEXT_RE.search(raw):
+            continue
+        if PROGRESS_RE.match(raw):
+            continue
+        if FIX_MAP.get(raw):
+            raw = FIX_MAP[raw]
+        nr = norm(raw)
+        if not nr:
+            continue
+
+        # 只有大小写不同的同一个 ID 优先精确命中，避免都算上
+        if raw in known:
+            if raw not in seen:
+                seen.add(raw)
+                results.append((raw, raw, 1.0, "ok"))
+            continue
+
+        subs = []
+        for k, nk in known_norm:
+            if len(nk) >= 2 and nk in nr:
+                subs.append((k, len(nk)))
+        if subs:
+            max_len = max(ln for _k, ln in subs)
+            for k, ln in subs:
+                if k in seen:
+                    continue
+                # 长名包含短名时，丢弃短名（如 希灵灰烬 vs 希灵）
+                if ln < max_len and any(ln < oln and norm(k) in norm(ok) for ok, oln in subs):
+                    continue
+                seen.add(k)
+                results.append((k, raw, 1.0, "ok"))
+            continue
+
+        name, score = best_match(raw, known)
+        if score >= min_match:
+            if name not in seen:
+                seen.add(name)
+                results.append((name, raw, round(score, 2), "ok"))
+        elif score >= min_match - 0.15:
+            if name not in seen:
+                seen.add(name)
+                results.append((name or raw, raw, round(score, 2), "guess"))
     return results
 
 
@@ -179,8 +290,9 @@ def _is_prosperity_like(t):
 
 
 # ---- 小队名识别增强（小队名含数字时易误读，如「6队」被读成「b队」）----
+# 内置只放通用「N队」；你自己名册里的小队名会被自动读进来（见 _load_squad_vocab）。
 SQUAD_VOCAB = ["一队", "二队", "三队", "四队", "五队", "七队", "八队",
-               "九队", "十队", "6队", "罗马集团", "AUG"]
+               "九队", "十队", "6队"]
 # 阿拉伯/中文数字互转（六→6，陆→6）
 CN_NUM = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5", "六": "6",
           "陆": "6", "七": "7", "八": "8", "九": "9", "十": "10"}

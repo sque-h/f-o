@@ -1,28 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""一键版打包配置（PyInstaller）。
+"""打包配置（PyInstaller，可选）。
+
+不打包也能用——直接 `python attendance_gui.py` 即可。
+想把源码做成双击即用的单文件夹 exe（自己留用/发给队友），才需要这个：
 
 用法：
   pyinstaller build.spec
-产物：dist/拉格朗日考勤/拉格朗日考勤.exe  （单文件夹，双击即用，完全离线）
+产物：dist/拉格朗日考勤/拉格朗日考勤.exe  （单文件夹，完全离线）
 
 要点：
   - 入口 attendance_gui.py（本地网页 GUI，零额外依赖）
-  - 强制打包 RapidOCR 的 3 个模型 onnx（否则运行时找不到模型）
+  - 本地 OCR 引擎为 PP-OCRv6 (medium)，模型在 ocr_models_v6/ 目录，需显式打包
   - 隐藏导入 onnxruntime / opencv / openpyxl 等
 """
 import os
-import rapidocr_onnxruntime
 
-PKG_DIR = os.path.dirname(rapidocr_onnxruntime.__file__)
-MODELS_DIR = os.path.join(PKG_DIR, "models")
+# v6 本地模型目录（与 build.spec 同级；SPECPATH 由 PyInstaller 注入）
+MODELS_DIR = os.path.join(SPECPATH, "ocr_models_v6")
 
-# RapidOCR 需要的数据文件（PyInstaller 只自动收 .py，yaml 必须显式打包）
-RAPIDOCR_DATAS = [
-    (MODELS_DIR, "rapidocr_onnxruntime/models"),
-    (os.path.join(PKG_DIR, "config.yaml"), "rapidocr_onnxruntime"),
-    (os.path.join(PKG_DIR, "ch_ppocr_v2_cls", "config.yaml"), "rapidocr_onnxruntime/ch_ppocr_v2_cls"),
-    (os.path.join(PKG_DIR, "ch_ppocr_v3_det", "config.yaml"), "rapidocr_onnxruntime/ch_ppocr_v3_det"),
-    (os.path.join(PKG_DIR, "ch_ppocr_v3_rec", "config.yaml"), "rapidocr_onnxruntime/ch_ppocr_v3_rec"),
+V6_DATAS = [
+    (MODELS_DIR, "ocr_models_v6"),
 ]
 
 block_cipher = None
@@ -31,22 +28,17 @@ a = Analysis(
     ["attendance_gui.py"],
     pathex=[],
     binaries=[],
-    datas=RAPIDOCR_DATAS,
+    datas=V6_DATAS,
     hiddenimports=[
         "onnxruntime",
-        "rapidocr_onnxruntime",
-        "rapidocr_onnxruntime.ch_ppocr_v3_det",
-        "rapidocr_onnxruntime.ch_ppocr_v3_rec",
-        "rapidocr_onnxruntime.ch_ppocr_v2_cls",
         "cv2",
         "numpy",
         "openpyxl",
         "PIL",
-        "pkg_resources",
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6"],
+    excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6", "rapidocr_onnxruntime"],
     cipher=block_cipher,
 )
 

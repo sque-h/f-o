@@ -3,10 +3,13 @@
 """拉格朗日考勤 · 开源版 主入口。
 
 功能：
-  - 纯本地 OCR 识别名字（RapidOCR，零密钥）
+  - 纯本地 OCR 识别名字（PP-OCRv6 medium，零密钥）
   - 单格式：活动考勤截图（谁来了谁没来）——支持纯名字名单图 与 集合点星图图片（自动判断）
   - 输出 CSV + 一张本地表（xlsx）
   - 案例库自动累积（cases/），可导出样本与他人共享
+
+边界：本免费版只吃【截图】。录屏/视频自动识别、繁荣度识别、权限分发、自动出表
+      属于完整版能力，本版遇到视频文件只会给提示、不做识别。
 
 用法：
   python attendance.py recognize <截图.png> [--roster roster.csv] [--type auto|starmap|attendance_list] [--date 2026-08-26]
@@ -22,6 +25,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import ocr_local
 import parse_names as pn
 
@@ -29,6 +33,8 @@ ROOT = Path(__file__).resolve().parent
 ROSTER = ROOT / "roster.csv"
 CASES_DIR = ROOT / "cases"
 CASES_DB = CASES_DIR / "cases.jsonl"
+# 开源免费版边界：只认截图。视频文件仅用于给出友好提示，不做识别。
+VIDEO_EXT = (".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv")
 
 # 历史考勤（每次 recognize 自动累积，用于统计连续/累计缺席）
 HISTORY_DIR = ROOT / "history"
@@ -185,7 +191,26 @@ def cmd_recognize(args):
 
     all_results = []          # 每张图提取出的 (name, raw, score, status) 汇总
     for idx, img in enumerate(images, 1):
+        if str(img).lower().endswith(VIDEO_EXT):
+            print(f"\n[提示] 第 {idx} 个是录屏（视频文件）：本免费版只支持【截图】识别，"
+                  "录屏自动识别是完整版能力。\n"
+                  "      用本版也可以：把画面放大/拖动，让重叠的名字分开，"
+                  "分几张截图，然后一次多选传进来。")
+            continue
         items = ocr_local.ocr_image(img)
+        # 截图张数少，多跑两路增强补小字/重叠字，尽量少漏人
+        try:
+            import numpy as _np
+            _frame = cv2.imdecode(_np.fromfile(str(img), dtype=_np.uint8), cv2.IMREAD_COLOR)
+            if _frame is not None:
+                _engine = ocr_local.get_engine()
+                for _aux in (idx % 4, (idx + 2) % 4):
+                    try:
+                        items += list(_engine.ocr(_aux_variant(_frame, _aux)))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         # 自动判断截图类型：纯名字名单 / 集合点星图（图片）/ 成员列表(应走 build-roster)
         cls = args.type if args.type and args.type != "auto" else pn.classify(items)
         if cls == "member_list":
@@ -196,6 +221,9 @@ def cmd_recognize(args):
         if cls == "starmap":
             print(f"[识别] 第 {idx} 张：检测到集合点星图，按星图模式提取名字…")
             results = pn.extract_names_starmap(items, known, min_match=args.min_match)
+        elif cls == "owner_labels":
+            print(f"[识别] 第 {idx} 张：检测到新版星图（舰队所属人名），按人名标签模式提取…")
+            results = pn.extract_names_owner_labels(items, known, min_match=args.min_match)
         else:
             if cls == "attendance_list":
                 print(f"[识别] 第 {idx} 张：检测到纯名字名单，按名单模式提取…")
@@ -216,7 +244,9 @@ def cmd_recognize(args):
         return
 
     present = {r[0] for r in results if r[3] == "ok"}
-    absent = [n for n in known if n not in present]
+    # 低置信「疑似」也算识别到了，不能再列进「未到场」，否则同一个人会同时出现两行
+    guessed = {r[0] for r in results if r[3] != "ok"}
+    absent = [n for n in known if n not in present and n not in guessed]
 
     # 累积历史（默认开；--no-history 仅本次、不写入历史）
     if not args.no_history:
@@ -263,7 +293,7 @@ def cmd_recognize(args):
     print("  到场名单：")
     for name, raw, score, status in results:
         mark = "" if status == "ok" else " [疑似]"
-        print(f"    ✓ {name}  (OCR「{raw}」 {score:.2f}){mark}")
+        print(f"    [到场] {name}  (OCR「{raw}」 {score:.2f}){mark}")
     if absent:
         print("  未到场：", "、".join(absent))
     if dates:
@@ -271,9 +301,38 @@ def cmd_recognize(args):
         print(f"\n[清退建议] 已记录 {len(dates)} 场活动；触发清退（连续≥{CONSEC_KICK} 或 累计≥{SEASON_ABSENT_CAP}）：")
         if kicked:
             for n in kicked:
-                print(f"    ✗ {n} —— {kick_reason(n, abs_info)}")
+                print(f"    [清退] {n} —— {kick_reason(n, abs_info)}")
         else:
             print("    暂无（都还安全）")
+
+
+def _aux_variant(frame, aux):
+    """第二路预处理：截图多跑一路增强，补重叠小字/浅色字。
+
+    0=2x min通道CLAHE（深底浅字的星图标签最吃这一路）
+    1=1.5x 灰度CLAHE（快，救正常对比度小字）
+    2=2x 灰度CLAHE（救偏灰发白的字）
+    3=1.5x min通道二值化（救被背景色压住、几乎看不清的字）
+    """
+    import numpy as np
+    h, w = frame.shape[:2]
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    kind = aux % 4
+    if kind in (0, 3):
+        base = np.min(frame.astype(np.int16), axis=2).astype(np.uint8)
+        big = cv2.resize(base, (w * 2 if kind == 0 else int(w * 1.5),
+                                h * 2 if kind == 0 else int(h * 1.5)),
+                         interpolation=cv2.INTER_CUBIC)
+        big = clahe.apply(big)
+        if kind == 3:
+            _t, big = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return cv2.cvtColor(big, cv2.COLOR_GRAY2BGR)
+    base = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if kind == 1:
+        big = cv2.resize(base, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_CUBIC)
+    else:
+        big = cv2.resize(base, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+    return cv2.cvtColor(clahe.apply(big), cv2.COLOR_GRAY2BGR)
 
 
 def append_case(img_path, items, results, date_str):
@@ -318,7 +377,7 @@ def main():
     r.add_argument("--no-history", action="store_true",
                    help="仅本次识别，不写入历史（不累积连续/累计缺席统计）")
     r.add_argument("--type", default="auto",
-                   choices=["auto", "attendance_list", "starmap", "member_list"],
+                   choices=["auto", "attendance_list", "starmap", "owner_labels", "member_list"],
                    help="截图类型（默认 auto 自动判断）")
     r.add_argument("--name-x-max", type=float, default=650, help="名字区域最大 x 坐标（名单模式用）")
     r.add_argument("--min-match", type=float, default=0.75)

@@ -6,7 +6,7 @@
 点按钮选截图即可完成「建名册 / 考勤打卡 / 导出案例」，全程不用命令行。
 
 技术：仅用 Python 标准库（http.server）+ attendance.py 已有依赖，无需 tkinter / flask。
-打包：可用 PyInstaller 打成单个 exe，模型已随 rapidocr 包内，离线可用。
+打包：可用 PyInstaller 打成单个 exe，本地 OCR 模型在 ocr_models_v6/ 目录内，离线可用。
 """
 import argparse
 import base64
@@ -21,24 +21,23 @@ from urllib.parse import urlparse, parse_qs
 
 import attendance as app
 
-# ---------------------------------------------------------------------------
-# 路径处理：未打包时输出到仓库；PyInstaller 冻结后输出到 exe 所在目录
-# （_MEIPASS 是只读临时目录，不能写文件）。
-# ---------------------------------------------------------------------------
-if getattr(sys, "frozen", False):
+
+# 冻结成 exe 之后，__file__ 在临时目录里，一律以 exe 所在目录为准
+if getattr(sys, 'frozen', False):
     BASE = Path(sys.executable).resolve().parent
 else:
     BASE = Path(__file__).resolve().parent
 
-# 让 attendance 模块的全局路径指向可写目录（冻结后尤其重要）
+# 名册 / 历史 / 案例库都跟 exe（或脚本）放一起，换电脑不丢
 app.ROOT = BASE
-app.ROSTER = BASE / "roster.csv"
-app.HISTORY_DIR = BASE / "history"
-app.HISTORY_CSV = app.HISTORY_DIR / "attendance.csv"
-app.CASES_DIR = BASE / "cases"
-app.CASES_DB = app.CASES_DIR / "cases.jsonl"
+app.ROSTER = BASE / 'roster.csv'
+app.HISTORY_DIR = BASE / 'history'
+app.HISTORY_CSV = app.HISTORY_DIR / 'attendance.csv'
+app.CASES_DIR = BASE / 'cases'
+app.CASES_DB = app.CASES_DIR / 'cases.jsonl'
 
-INDEX_HTML = r"""<!DOCTYPE html>
+
+INDEX_HTML = '''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -75,8 +74,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>拉格朗日考勤 · 一键版</h1>
-  <p>本地识别截图，自动统计「谁来了谁没来」 · 纯离线 · 零封号风险</p>
+<h1>拉格朗日考勤 · 一键版 <span style="font-size:12px;background:#e67e22;color:#111;border-radius:10px;padding:2px 8px;vertical-align:middle">截图版（免费）</span></h1>
+  <p>新版星图·舰队所属人名截图识别 · 本地离线 · 零封号风险 · 免费测试收问题</p>
 </header>
 <div class="wrap">
 
@@ -116,6 +115,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <label style="margin-left:10px;font-size:12px;color:#9fb0c8">
       <input type="checkbox" id="noHistory"> 仅本次（不累积历史）</label>
     <div id="attResult" class="result" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <h2>第 2.5 步 · 新版星图（舰队所属人名）</h2>
+    <div class="step">2026-09 游戏更新后，星图会直接把舰队所属人名标出来。
+      <br>名字重叠时，把画面<b>放大 / 移动</b>让名字分开，再多截几张；<b>同一场</b>的截图一次全选。
+      <br>这一次选中算一场考勤，多张自动合并，不会算重。
+      <br><b>本免费版只吃截图</b>；录屏自动识别、繁荣度、权限分发、自动出表属于完整版能力。</div>
+    <input type="file" id="ownerFile" accept="image/*" multiple>
+    <div style="margin:8px 0">活动日期：<input type="date" id="ownerDate"></div>
+    <button onclick="recognizeOwner()">识别新版星图</button>
+    <div id="ownerResult" class="result" style="display:none"></div>
   </div>
 
   <div class="card">
@@ -211,6 +222,23 @@ async function recognize(){
   else show('attResult','❌ '+j.error,'err');
 }
 
+async function recognizeOwner(){
+  const files=document.getElementById('ownerFile').files;
+  if(!files.length){show('ownerResult','请先选择新版星图截图（可多选）','warn');return;}
+  const imgs=[];for(const f of files){imgs.push({name:f.name,data:await b64(f)});}
+  const date=document.getElementById('ownerDate').value||'';
+  show('ownerResult','识别中…（'+(imgs.length>1?imgs.length+' 张图合并中…':'')+'首次可能需十几秒加载模型）');
+  const j=await postJSON('/api/recognize',{images:imgs,date:date,no_history:false,type:'owner_labels'});
+  if(j.ok){let h='✅ '+j.date+'　到场 <b>'+j.present.length+'</b> / 名册 <b>'+j.total+
+    '</b>　未到场 <b>'+j.absent.length+'</b>'+(j.images?('（共 '+j.images+' 张图）'):'')+'<br>'+
+    '<a class="dl" href="/download?f='+encodeURIComponent(j.xlsx)+'">下载 Excel 表</a> '+
+    '<a class="dl" href="/download?f='+encodeURIComponent(j.csv)+'">下载 CSV</a><br><br>';
+    if(j.present.length){h+='<span class="ok">到场：</span><br>'+j.present.map(n=>'✓ '+n).join('、')+'<br><br>';}
+    if(j.absent.length){h+='<span class="err">未到场：</span><br>'+j.absent.map(n=>'✗ '+n).join('、');}
+    show('ownerResult',h,'ok');}
+  else show('ownerResult','❌ '+j.error,'err');
+}
+
 async function exportCases(){
   show('caseResult','导出中…');
   const j=await postJSON('/api/export',{});
@@ -221,15 +249,14 @@ async function exportCases(){
 
 // 默认日期填今天
 document.getElementById('attDate').value=new Date().toISOString().slice(0,10);
+document.getElementById('ownerDate').value=new Date().toISOString().slice(0,10);
 </script>
 </body>
-</html>"""
+</html>'''
 
 
-# ---------------------------------------------------------------------------
-# 业务逻辑（复用 attendance 模块，捕获 stdout 作为日志）
-# ---------------------------------------------------------------------------
 def _capture_stdout(func, *a, **kw):
+    """把函数里的 print 抓成字符串，返回给网页端当日志。"""
     buf = io.StringIO()
     old = sys.stdout
     sys.stdout = buf
@@ -257,8 +284,10 @@ def do_build_roster(images_b64, overwrite=False):
     before = len(_load_roster_names())
     log = _capture_stdout(app.cmd_build_roster, args)
     for p in paths:
-        try: os.remove(p)
-        except OSError: pass
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     known = _load_roster_names()
     merged = (before if (not overwrite and before) else 0)
     return {"ok": True, "count": len(known), "names": known[:50],
@@ -293,7 +322,7 @@ def do_save_roster(rows):
     return {"ok": True, "count": len(cleaned)}
 
 
-def do_recognize(images_b64, date, no_history):
+def do_recognize(images_b64, date, no_history, rtype="auto"):
     paths = []
     for i, im in enumerate(images_b64):
         p = BASE / f"_up_att_{i}.png"
@@ -301,12 +330,14 @@ def do_recognize(images_b64, date, no_history):
         paths.append(str(p))
     args = argparse.Namespace(
         images=paths, roster=str(app.ROSTER), date=(date or None),
-        no_history=bool(no_history), type="auto", name_x_max=650.0, min_match=0.75,
+        no_history=bool(no_history), type=(rtype or "auto"), name_x_max=650.0, min_match=0.75,
     )
     log = _capture_stdout(app.cmd_recognize, args)
     for p in paths:
-        try: os.remove(p)
-        except OSError: pass
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     # 读取生成的考勤结果
     import csv
     known = _load_roster_names()
@@ -344,12 +375,9 @@ def do_export_cases():
     return {"ok": False, "error": "案例库为空，无内容可导出"}
 
 
-# ---------------------------------------------------------------------------
-# HTTP 服务
-# ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):  # 静默
-        pass
+    def log_message(self, *a):
+        return
 
     def _send(self, code, body, ctype="application/json"):
         if isinstance(body, (dict, list)):
@@ -364,14 +392,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
-        if u.path == "/" or u.path == "":
+        if u.path in ("/", ""):
             self._send(200, INDEX_HTML, "text/html")
-        elif u.path == "/download":
+            return
+        if u.path == "/download":
             q = parse_qs(u.query)
             name = q.get("f", [""])[0]
-            # 仅允许下载 BASE 目录下的安全文件名
+            # 只允许下载 BASE 下的 csv/xlsx/zip，顺手挡掉目录穿越
             safe = Path(name).name
-            fp = (BASE / safe)
+            fp = BASE / safe
             if fp.exists() and fp.parent == BASE and safe.lower().endswith((".csv", ".xlsx", ".zip")):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
@@ -380,10 +409,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
-            else:
-                self._send(404, {"ok": False, "error": "文件不存在"})
-        else:
-            self._send(404, {"ok": False, "error": "not found"})
+                return
+            self._send(404, {"ok": False, "error": "文件不存在"})
+            return
+        self._send(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
         u = urlparse(self.path)
@@ -402,7 +431,7 @@ class Handler(BaseHTTPRequestHandler):
                 res = do_save_roster(payload.get("rows", []))
             elif u.path == "/api/recognize":
                 res = do_recognize(payload.get("images", []), payload.get("date", ""),
-                                   payload.get("no_history", False))
+                                   payload.get("no_history", False), payload.get("type", "auto"))
             elif u.path == "/api/export":
                 res = do_export_cases()
             else:
@@ -422,33 +451,32 @@ def run_server(open_browser=True, port=8765):
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        pass
+        return
 
 
-# ---------------------------------------------------------------------------
-# 自检模式（无界面，供打包前验证）
-# ---------------------------------------------------------------------------
 def selftest(roster_img=None, att_img=None):
-    print("=== 自检：导入 ===")
-    import ocr_local, parse_names  # noqa
-    print("  attendance / ocr_local / parse_names 导入 OK")
-    print("=== 自检：HTTP 服务 ===")
+    print('=== 自检：导入 ===')
+    import ocr_local
+    import parse_names
+    print('  attendance / ocr_local / parse_names 导入 OK')
+
+    print('=== 自检：HTTP 服务 ===')
     import urllib.request
-    srv = ThreadingHTTPServer(("127.0.0.1", 8799), Handler)
+    srv = ThreadingHTTPServer(('127.0.0.1', 8799), Handler)
     import threading
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
-    html = urllib.request.urlopen("http://127.0.0.1:8799/").read().decode("utf-8")
-    assert "拉格朗日考勤" in html, "首页未正常返回"
-    print("  首页返回 OK")
+    html = urllib.request.urlopen('http://127.0.0.1:8799/').read().decode('utf-8')
+    assert '拉格朗日考勤' in html, '首页未正常返回'
+    print('  首页返回 OK')
     srv.shutdown()
     if roster_img and att_img:
-        print("=== 自检：真实截图流程 ===")
+        print('=== 自检：真实截图流程 ===')
         r = do_build_roster([{"name": "m.png", "data": base64.b64encode(Path(roster_img).read_bytes()).decode()}])
-        print("  build-roster:", r["count"], "人", "OK" if r["ok"] else r.get("error"))
+        print('  build-roster:', r['count'], '人', 'OK' if r['ok'] else r.get('error'))
         a = do_recognize([{"name": "a.png", "data": base64.b64encode(Path(att_img).read_bytes()).decode()}], "", False)
-        print("  recognize: 到场", len(a["present"]), "/ 名册", a["total"], "OK" if a["ok"] else a.get("error"))
-    print("=== 自检完成 ===")
+        print('  recognize: 到场', len(a['present']), '/ 名册', a['total'], 'OK' if a['ok'] else a.get('error'))
+    print('=== 自检完成 ===')
 
 
 if __name__ == "__main__":
